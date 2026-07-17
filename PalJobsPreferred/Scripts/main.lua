@@ -49,6 +49,20 @@ do
 end
 
 -- ---------------------------------------------------------------------------
+-- CRASH-CRITICAL: UE4SS returns a WRAPPER object (not nil) for a null/stale
+-- UObject, and calling a method on it can crash NATIVELY — pcall cannot
+-- catch that, since the crash happens in native code before Lua sees
+-- anything. Always check IsValid() (itself safe on null/stale wrappers)
+-- before any further method call. Defined early (moved up from its original
+-- position further down this file) because checkIsServer() below needs it.
+-- ---------------------------------------------------------------------------
+local function alive(obj)
+    if obj == nil then return false end
+    local ok, v = pcall(function() return obj:IsValid() end)
+    return ok and v == true
+end
+
+-- ---------------------------------------------------------------------------
 -- Role detection. LIVE-VERIFIED (Task 5): KismetSystemLibrary::IsServer()
 -- requires an explicit world-bound WorldContextObject argument (a CDO alone
 -- errors with "expected 2 parameters, received 0"; the class default object
@@ -58,15 +72,17 @@ end
 -- time, before the World's NetMode is fully established; called again just
 -- a few seconds later it's correct. So this is a function re-checked fresh
 -- at each decision point (hooks fire well after startup in practice), never
--- a one-time snapshot cached at load.
+-- a one-time snapshot cached at load. Uses alive(), not a plain nil check,
+-- on both sysLib and gs — a stale-but-non-nil wrapper here would otherwise
+-- risk a native crash on :IsServer(gs) (see CRASH-CRITICAL note above).
 -- ---------------------------------------------------------------------------
 local function checkIsServer()
     local sysLib = nil
     pcall(function() sysLib = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary") end)
-    if not sysLib then return false end
+    if not alive(sysLib) then return false end
     local gs = nil
     pcall(function() gs = FindFirstOf("GameStateBase") end)
-    if not gs then return false end
+    if not alive(gs) then return false end
     local result = false
     pcall(function() result = sysLib:IsServer(gs) end)
     return result
@@ -348,11 +364,8 @@ local function classNameOf(obj)
     return name
 end
 
-local function alive(obj)
-    if obj == nil then return false end
-    local ok, v = pcall(function() return obj:IsValid() end)
-    return ok and v == true
-end
+-- alive() is defined earlier in this file (checkIsServer() needs it too) —
+-- not redefined here.
 
 local rowKeyCache = {}
 local bindHooked = false
