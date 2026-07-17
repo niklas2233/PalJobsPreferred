@@ -87,6 +87,18 @@ real multi-player, multi-base world (the test world has 2 players, 3 bases).
 `priorities.lua`, same shape as today, `prio` values now range **0–10**
 (was 0–5) to give finer granularity across the game's 12 work types.
 
+**Storage format decision**: stays a Lua table (`return { pals = { ... } }`),
+parsed via `load()`, not JSON. Rationale: UE4SS's Lua sandbox has no built-in
+JSON library, so a Lua table is a zero-dependency format — `load()` gives a
+free parser with no vendored file needed. It also preserves the original's
+hand-editable, comment-friendly format (the roster/dump tooling generates
+ready-to-paste commented entries). The main downside of a code-as-config
+format — executing arbitrary content — is a non-issue here specifically
+because in this design the file is **purely server-side persistence**: the
+client no longer reads it directly at all (it receives pushed state over the
+network channel instead), so nothing cross-machine ever depends on parsing
+this file's contents.
+
 ## Fallback behavior for unmodded clients (explicit, preserved from original)
 
 - Unconfigured pal touched by a vanilla client: fully ignored, pal stays
