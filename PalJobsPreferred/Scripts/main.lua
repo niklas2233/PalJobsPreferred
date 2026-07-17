@@ -49,52 +49,48 @@ do
 end
 
 -- ---------------------------------------------------------------------------
--- Role detection. FLAGGED FOR LIVE VERIFICATION — see Task 5 Step 1. This is
--- the first thing checked when this mod is deployed anywhere, before
--- anything else in this file is trusted.
+-- Role detection. LIVE-VERIFIED (Task 5): KismetSystemLibrary::IsServer()
+-- requires an explicit world-bound WorldContextObject argument (a CDO alone
+-- errors with "expected 2 parameters, received 0"; the class default object
+-- itself as context returns a wrong `false` since it has no valid World) —
+-- a live GameStateBase actor works correctly. It ALSO reads wrong (false,
+-- even on a genuine dedicated server) if called synchronously at mod-load
+-- time, before the World's NetMode is fully established; called again just
+-- a few seconds later it's correct. So this is a function re-checked fresh
+-- at each decision point (hooks fire well after startup in practice), never
+-- a one-time snapshot cached at load.
 -- ---------------------------------------------------------------------------
-local isServer = false
-do
+local function checkIsServer()
     local sysLib = nil
     pcall(function() sysLib = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary") end)
-    if sysLib then
-        local ok = pcall(function() isServer = sysLib:IsServer() end)
-        if not ok then
-            log("IsServer() call failed — see Task 5 Step 1 fallback")
-        end
-    else
-        log("KismetSystemLibrary not found — see Task 5 Step 1 fallback")
-    end
+    if not sysLib then return false end
+    local gs = nil
+    pcall(function() gs = FindFirstOf("GameStateBase") end)
+    if not gs then return false end
+    local result = false
+    pcall(function() result = sysLib:IsServer(gs) end)
+    return result
 end
-log("role: " .. (isServer and "server-authoritative" or "client-only"))
 
 -- ---------------------------------------------------------------------------
 -- Config state (server-authoritative role only writes; every role can read
 -- what's on disk, though only the authoritative role's copy is meaningful).
+-- Loading is deferred behind the same startup window checkIsServer() needs
+-- (see above) — evaluating it synchronously at load would incorrectly see
+-- client-only and skip loading a real server's config.
 -- ---------------------------------------------------------------------------
 local CONFIG_PATH = core.resolveConfigPath()
 local config = { pals = {} }
-
-if isServer then
-    local cfg, lerr = core.loadConfig(CONFIG_PATH)
-    if cfg then
-        config = cfg
-        local n = 0
-        for _ in pairs(config.pals) do n = n + 1 end
-        log(string.format("config loaded: %d pal(s) configured", n))
-    else
-        log("config load failed (" .. tostring(lerr) .. ") — starting with empty config")
-    end
-end
+local startupRoleLogged = false
 
 local function persist()
-    if not isServer then return end
+    if not checkIsServer() then return end
     local ok, err = core.saveConfig(config, CONFIG_PATH)
     if not ok then logOnce("save", "config save failed: " .. tostring(err)) end
 end
 
 -- ===========================================================================
--- SERVER-AUTHORITATIVE LOGIC — bodies below only act when isServer is true.
+-- SERVER-AUTHORITATIVE LOGIC — bodies below only act when checkIsServer() is true.
 -- ===========================================================================
 
 local moddedComps = {}
@@ -144,13 +140,13 @@ local function sendToggle(raw, workType, wantOn)
 end
 
 -- (A) Pending-work intake — server role only; harmless no-op elsewhere since
--- the hook body below checks isServer before doing anything.
+-- the hook body below checks checkIsServer() before doing anything.
 local pending = {}
 
 local okA, errA = pcall(function()
     RegisterHook("/Script/Pal.PalBaseCampWorkerDirector:OnRequiredAssignWork_ServerInternal",
         function(Context, Work, RequirementParameter)
-            if not isServer then return end
+            if not checkIsServer() then return end
             local ok, err = pcall(function()
                 local w = Work:get()
                 if not w then return end
@@ -176,7 +172,7 @@ local okB, errB = pcall(function()
     RegisterHook("/Script/Pal.PalNetworkBaseCampComponent:RequestChangeWorkSuitability_ToServer",
         function(Context, TargetIndividualId, WorkSuitability, bOn)
             pcall(function()
-                if isServer and not campComp then campComp = Context:get() end
+                if checkIsServer() and not campComp then campComp = Context:get() end
             end)
             if internalCall then return end
 
@@ -198,7 +194,7 @@ local okB, errB = pcall(function()
                 end)
             end
 
-            if not isServer then return end -- only the authority decides anything further
+            if not checkIsServer() then return end -- only the authority decides anything further
 
             local ok, err = pcall(function()
                 local id = TargetIndividualId:get()
@@ -285,7 +281,7 @@ log(okB and "HOOK OK RequestChangeWorkSuitability_ToServer"
 local okC, errC = pcall(function()
     RegisterHook("/Script/Pal.PalNetworkBaseCampComponent:Request_Server_int32",
         function(Context, BaseCampId, FunctionName, Value)
-            if not isServer then return end
+            if not checkIsServer() then return end
             local ok, err = pcall(function()
                 local name = FunctionName:get():ToString()
                 if type(name) ~= "string" or name:sub(1, 8) ~= "PrioMod_" then return end
@@ -337,11 +333,10 @@ log(okC and "HOOK OK Request_Server_int32"
 -- ===========================================================================
 
 local displayPrio = {} -- palKey -> { [workType] = prio } — populated locally
--- when isServer (same-process config IS the display state); populated by
--- Task 7's server->client push for a pure remote client.
-if isServer then
-    for k, e in pairs(config.pals) do displayPrio[k] = e.prio end
-end
+-- on the server-authoritative role (same-process config IS the display
+-- state) by the deferred startup block below, once checkIsServer() is
+-- reliable; populated by Task 7's server->client push for a pure remote
+-- client instead.
 
 local MENU_CLASS = "WBP_WorkSuitabilityPreferenceMenu_C"
 local CELL_CLASS = "WBP_WorkSuitabilityPreference_CheckBox_0_C"
@@ -601,7 +596,7 @@ local function tickBody()
         menuLikelyOpen = false
         return
     end
-    if not isServer and not helloSent then
+    if not checkIsServer() and not helloSent then
         pcall(function()
             local comp = findOwnComp()
             if alive(comp) then
@@ -719,6 +714,34 @@ end)
 
 pcall(function()
     ExecuteInGameThread(function() pcall(tryHookBind) end)
+end)
+
+-- ---------------------------------------------------------------------------
+-- Deferred startup: role log + config load + initial displayPrio population.
+-- Delayed 5s past mod-load, past the window checkIsServer() is unreliable in
+-- (see the comment on checkIsServer above) — a dedicated server correctly
+-- reports server-authoritative by this point, every time, in live testing.
+-- ---------------------------------------------------------------------------
+pcall(function()
+    LoopAsync(5000, function()
+        if startupRoleLogged then return true end
+        startupRoleLogged = true
+        local server = checkIsServer()
+        log("role: " .. (server and "server-authoritative" or "client-only"))
+        if server then
+            local cfg, lerr = core.loadConfig(CONFIG_PATH)
+            if cfg then
+                config = cfg
+                local n = 0
+                for _ in pairs(config.pals) do n = n + 1 end
+                log(string.format("config loaded: %d pal(s) configured", n))
+            else
+                log("config load failed (" .. tostring(lerr) .. ") — starting with empty config")
+            end
+            for k, e in pairs(config.pals) do displayPrio[k] = e.prio end
+        end
+        return true -- one-shot
+    end)
 end)
 
 log(string.format("v%s ready.", VERSION))
