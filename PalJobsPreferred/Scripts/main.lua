@@ -718,15 +718,30 @@ end)
 
 -- ---------------------------------------------------------------------------
 -- Deferred startup: role log + config load + initial displayPrio population.
--- Delayed 5s past mod-load, past the window checkIsServer() is unreliable in
--- (see the comment on checkIsServer above) — a dedicated server correctly
--- reports server-authoritative by this point, every time, in live testing.
+-- Retries every 5s (past the window checkIsServer() is unreliable in — see
+-- the comment on checkIsServer above) until it reads server-authoritative,
+-- rather than trusting a single reading: a one-shot attempt that happened
+-- to land on a wrong `false` would permanently skip loading priorities.lua
+-- for the rest of the session, and a later successful persist() (triggered
+-- by an ordinary player toggle, whose own checkIsServer() call happens much
+-- later and would very plausibly read correctly) would then silently
+-- overwrite the file with a config missing every previously-saved pal.
+-- Bounded at STARTUP_MAX_ATTEMPTS so a genuine pure client — which reads
+-- false forever, correctly — eventually settles into a final "client-only"
+-- log instead of retrying indefinitely.
 -- ---------------------------------------------------------------------------
+local STARTUP_MAX_ATTEMPTS = 12 -- 12 * 5s = 60s, generous margin over the ~5s seen in testing
+local startupAttempts = 0
+
 pcall(function()
     LoopAsync(5000, function()
         if startupRoleLogged then return true end
-        startupRoleLogged = true
+        startupAttempts = startupAttempts + 1
         local server = checkIsServer()
+        if not server and startupAttempts < STARTUP_MAX_ATTEMPTS then
+            return false -- retry at the next tick
+        end
+        startupRoleLogged = true
         log("role: " .. (server and "server-authoritative" or "client-only"))
         if server then
             local cfg, lerr = core.loadConfig(CONFIG_PATH)
@@ -740,7 +755,7 @@ pcall(function()
             end
             for k, e in pairs(config.pals) do displayPrio[k] = e.prio end
         end
-        return true -- one-shot
+        return true -- stop retrying: either confirmed server, or gave up after STARTUP_MAX_ATTEMPTS
     end)
 end)
 
