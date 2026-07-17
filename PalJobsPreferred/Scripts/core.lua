@@ -122,14 +122,7 @@ function M.saveConfig(config, path)
     if not f then return false, "cannot open " .. tmp .. " for write" end
     f:write(M.serializeConfig(config))
     f:close()
-    local sf = io.open(tmp, "r")
-    local text = sf:read("*a")
-    sf:close()
-    local df = io.open(path, "w")
-    if not df then return false, "cannot open " .. path .. " for write" end
-    df:write(text)
-    df:close()
-    os.remove(tmp)
+    if not os.rename(tmp, path) then return false, "cannot rename " .. tmp .. " to " .. path end
     return true
 end
 
