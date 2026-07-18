@@ -64,27 +64,34 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Role detection. LIVE-VERIFIED (Task 5): KismetSystemLibrary::IsServer()
--- requires an explicit world-bound WorldContextObject argument (a CDO alone
--- errors with "expected 2 parameters, received 0"; the class default object
--- itself as context returns a wrong `false` since it has no valid World) —
--- a live GameStateBase actor works correctly. It ALSO reads wrong (false,
--- even on a genuine dedicated server) if called synchronously at mod-load
--- time, before the World's NetMode is fully established; called again just
--- a few seconds later it's correct. So this is a function re-checked fresh
--- at each decision point (hooks fire well after startup in practice), never
--- a one-time snapshot cached at load. Uses alive(), not a plain nil check,
--- on both sysLib and gs — a stale-but-non-nil wrapper here would otherwise
--- risk a native crash on :IsServer(gs) (see CRASH-CRITICAL note above).
+-- turned out fundamentally unreliable in this UE4SS/Wine environment — it
+-- read TRUE on a genuine connected remote client (confirmed with a real
+-- player joining the disposable research server), which would make a
+-- client run server-authoritative logic locally, exactly the bug this
+-- whole single-mod design was meant to fix. Replaced with the actor's own
+-- HasAuthority() (Role == ROLE_Authority), the standard, fundamental
+-- Unreal API for this exact question rather than the Kismet convenience
+-- wrapper — confirmed correct in both directions with a real client
+-- connected: true on the dedicated server, false on the client, for the
+-- same live GameStateBase actor at the same moment.
+--
+-- Re-checked fresh at each decision point (hooks fire well after startup
+-- in practice), never a one-time snapshot cached at load — the earlier
+-- IsServer() version also read wrong for a few seconds right at mod-load,
+-- before the World's NetMode/replication state settled; HasAuthority()
+-- hasn't been proven immune to the same startup window, so the same
+-- always-recheck discipline still applies defensively.
+--
+-- Uses alive(), not a plain nil check, on gs — a stale-but-non-nil wrapper
+-- here would otherwise risk a native crash on :HasAuthority() (see
+-- CRASH-CRITICAL note above).
 -- ---------------------------------------------------------------------------
 local function checkIsServer()
-    local sysLib = nil
-    pcall(function() sysLib = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary") end)
-    if not alive(sysLib) then return false end
     local gs = nil
     pcall(function() gs = FindFirstOf("GameStateBase") end)
     if not alive(gs) then return false end
     local result = false
-    pcall(function() result = sysLib:IsServer(gs) end)
+    pcall(function() result = gs:HasAuthority() end)
     return result
 end
 
