@@ -145,7 +145,11 @@ local internalCall = false
 local campComp = nil
 
 local function sendToggle(raw, workType, wantOn)
-    if not campComp then return end
+    -- campComp is captured once and cached for the mod's lifetime (see hook
+    -- B below) — re-checked with alive() on every use, not just a nil check,
+    -- since the underlying component could in principle be destroyed/
+    -- recreated between capture and a later call.
+    if not alive(campComp) then return end
     internalCall = true
     pcall(function()
         campComp:RequestChangeWorkSuitability_ToServer(
@@ -165,7 +169,7 @@ local okA, errA = pcall(function()
             if not checkIsServer() then return end
             local ok, err = pcall(function()
                 local w = Work:get()
-                if not w then return end
+                if not alive(w) then return end
                 local wt = nil
                 pcall(function() wt = w:GetWorkType() end)
                 if type(wt) ~= "number" or wt < core.WORK_MIN or wt > core.WORK_MAX then return end
@@ -231,7 +235,7 @@ local okB, errB = pcall(function()
                 if dirStep == nil then
                     if not cfg then return end
                     local fid, fparam = findPalByKey(key)
-                    if fparam then
+                    if alive(fparam) then
                         local raw = cfg.raw
                         for t = core.WORK_MIN, core.WORK_MAX do
                             if t ~= work then
@@ -253,7 +257,7 @@ local okB, errB = pcall(function()
 
                 local fid, fparam = findPalByKey(key)
                 if not cfg then
-                    if not fparam then return end
+                    if not alive(fparam) then return end
                     local prio = {}
                     local nInit = 0
                     for t = core.WORK_MIN, core.WORK_MAX do
